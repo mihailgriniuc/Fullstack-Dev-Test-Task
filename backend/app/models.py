@@ -1,3 +1,4 @@
+import enum
 import uuid
 from datetime import datetime, timezone
 
@@ -10,11 +11,24 @@ def get_datetime_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
+class UserRole(str, enum.Enum):
+    """
+    Role-based access control levels.
+    admin: Full access to user management and settings.
+    manager: Can list users and view metrics, but not change global settings.
+    member: Can only access their own profile and basic app features.
+    """
+
+    ADMIN = "admin"
+    MANAGER = "manager"
+    MEMBER = "member"
+
+
 # Shared properties
 class UserBase(SQLModel):
     email: EmailStr = Field(unique=True, index=True, max_length=255)
     is_active: bool = True
-    is_superuser: bool = False
+    role: UserRole = Field(default=UserRole.MEMBER)
     full_name: str | None = Field(default=None, max_length=255)
 
 
@@ -33,6 +47,7 @@ class UserRegister(SQLModel):
 class UserUpdate(UserBase):
     email: EmailStr | None = Field(default=None, max_length=255)  # type: ignore[assignment]
     password: str | None = Field(default=None, min_length=8, max_length=128)
+    role: UserRole | None = Field(default=None)
 
 
 class UserUpdateMe(SQLModel):

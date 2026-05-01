@@ -25,13 +25,14 @@ export const Route = createFileRoute("/_layout/settings")({
 
 function UserSettings() {
   const { user: currentUser } = useAuth()
-  const finalTabs = currentUser?.is_superuser
-    ? tabsConfig.slice(0, 3)
-    : tabsConfig
 
   if (!currentUser) {
     return null
   }
+
+  // Only admin users see the "Danger zone" tab (delete account)
+  const isAdmin = currentUser.role === "admin"
+  const finalTabs = isAdmin ? tabsConfig : tabsConfig.slice(0, 2)
 
   return (
     <div className="flex flex-col gap-6">

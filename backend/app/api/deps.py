@@ -11,7 +11,7 @@ from sqlmodel import Session
 from app.core import security
 from app.core.config import settings
 from app.core.db import engine
-from app.models import TokenPayload, User
+from app.models import TokenPayload, User, UserRole
 
 reusable_oauth2 = OAuth2PasswordBearer(
     tokenUrl=f"{settings.API_V1_STR}/login/access-token"
@@ -49,9 +49,26 @@ def get_current_user(session: SessionDep, token: TokenDep) -> User:
 CurrentUser = Annotated[User, Depends(get_current_user)]
 
 
-def get_current_active_superuser(current_user: CurrentUser) -> User:
-    if not current_user.is_superuser:
-        raise HTTPException(
-            status_code=403, detail="The user doesn't have enough privileges"
-        )
-    return current_user
+def require_role(required_roles: list[UserRole]) -> User:
+    """
+    Dependency factory: returns a dependency that ensures the current user
+    has one of the specified roles.
+
+    Usage:
+        @router.get("/users/", dependencies=[Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))])
+    """
+
+    def role_checker(current_user: CurrentUser) -> User:
+        if current_user.role not in required_roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="The user doesn't have enough privileges",
+            )
+        return current_user
+
+    return role_checker
+
+
+# Convenience role-check dependencies for common role combinations
+AdminDep = Depends(require_role([UserRole.ADMIN]))
+ManagerOrAdminDep = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER]))

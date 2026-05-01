@@ -224,6 +224,188 @@ General development docs: [development.md](./development.md).
 
 This includes using Docker Compose, custom local domains, `.env` configurations, etc.
 
+## Role-Based Access Control (RBAC)
+
+This fork adds role-based access control (RBAC) on top of the [fastapi/full-stack-fastapi-template](https://github.com/fastapi/full-stack-fastapi-template).
+
+### Quick Start
+
+```bash
+# 1. Start the stack
+docker compose up -d
+
+# 2. Apply the RBAC migration
+docker compose exec backend bash -c "alembic upgrade head"
+
+# 3. Open the app at http://localhost:5173
+```
+
+### Roles
+
+| Role        | Description                                                                |
+| ----------- | -------------------------------------------------------------------------- |
+| **admin**   | Full access to user management, settings, metrics, and all items           |
+| **manager** | Can list users and view metrics, but cannot create/update/delete users     |
+| **member**  | Can only access their own profile, their own items, and basic app features |
+
+### Permission Matrix
+
+| Action             | admin | manager | member |
+| ------------------ | ----- | ------- | ------ |
+| List all users     | ✅    | ✅      | ❌     |
+| Create user        | ✅    | ❌      | ❌     |
+| Update any profile | ✅    | ❌      | ❌     |
+| Delete users       | ✅    | ❌      | ❌     |
+| View metrics       | ✅    | ✅      | ❌     |
+| View own profile   | ✅    | ✅      | ✅     |
+| Update own profile | ✅    | ✅      | ✅     |
+| Create items       | ✅    | ✅      | ✅     |
+| View all items     | ✅    | ❌      | ❌     |
+
+### Seeded Test Users
+
+These users are created automatically on first database initialization:
+
+| Email                 | Password     | Role        | Notes                                  |
+| --------------------- | ------------ | ----------- | -------------------------------------- |
+| `admin@example.com`   | `changethis` | **admin**   | Full access. Change password in `.env` |
+| `manager@example.com` | `admin123`   | **manager** | Can list users, view metrics           |
+| `member@example.com`  | `member123`  | **member**  | Own profile + items only               |
+
+> To add more seed users, edit `backend/app/core/db.py` → `init_db()`.
+
+### Frontend Behavior by Role
+
+| Area             | admin                                        | manager                                   | member                         |
+| ---------------- | -------------------------------------------- | ----------------------------------------- | ------------------------------ |
+| **Sidebar**      | Dashboard, Items, **Metrics**, **Admin**     | Dashboard, Items, **Metrics**             | Dashboard, Items               |
+| **Admin page**   | ✅ Full user management (list, create, edit) | ❌ Redirected to home                     | ❌ Redirected to home          |
+| **Metrics page** | ✅ Can view metrics                          | ✅ Can view metrics (view-only indicator) | ❌ Redirected to access denied |
+| **Settings**     | My Profile, Password, **Danger zone**        | My Profile, Password                      | My Profile, Password           |
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────┐
+│                   Frontend (React)                   │
+│  ┌──────────┐   ┌──────────────┐   ┌────────────┐  │
+│  │ Sidebar  │   │ beforeLoad   │   │ useAuth    │  │
+│  │ (nav     │   │ (route guard)│   │ (user.role)│  │
+│  │  items)  │   │              │   │            │  │
+│  └──────────┘   └──────────────┘   └────────────┘  │
+│         │               │                  ▲        │
+│         ▼               ▼                  │        │
+│  ┌─────────────────────────────────────────┴───┐    │
+│  │           HTTP API (generated client)       │    │
+│  └───────────────────┬─────────────────────────┘    │
+└──────────────────────┼──────────────────────────────┘
+                       │
+┌──────────────────────┼──────────────────────────────┐
+│                      ▼                              │
+│  ┌──────────────────────────────────────────────┐   │
+│  │         FastAPI Backend                       │   │
+│  │                                               │   │
+│  │  ┌──────────────────────────────────────┐     │   │
+│  │  │  Dependencies (deps.py)              │     │   │
+│  │  │  ┌──────────┐  ┌────────────────┐    │     │   │
+│  │  │  │get_current│  │require_role()  │    │     │   │
+│  │  │  │_user     │  │AdminDep        │    │     │   │
+│  │  │  │          │  │ManagerOrAdminDep│   │     │   │
+│  │  │  └──────────┘  └────────────────┘    │     │   │
+│  │  └──────────────────────────────────────┘     │   │
+│  │         │                                     │   │
+│  │         ▼                                     │   │
+│  │  ┌──────────────────────────────────────┐     │   │
+│  │  │  Routes (users.py, items.py,         │     │   │
+│  │  │           metrics.py)                │     │   │
+│  │  │  dependencies=[AdminDep]             │     │   │
+│  │  │  dependencies=[ManagerOrAdminDep]    │     │   │
+│  │  └──────────────────────────────────────┘     │   │
+│  │         │                                     │   │
+│  │         ▼                                     │   │
+│  │  ┌──────────────────────────────────────┐     │   │
+│  │  │  SQLModel / PostgreSQL               │     │   │
+│  │  │  User.role = "admin"|"manager"|"member"│    │   │
+│  │  └──────────────────────────────────────┘     │   │
+│  └──────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────┘
+```
+
+**Where authorization checks live:**
+Authorization is enforced through **FastAPI dependencies** in `backend/app/api/deps.py`.
+The `require_role()` factory function creates reusable dependency callables that check
+`current_user.role` against a list of allowed roles. Convenience aliases `AdminDep` and
+`ManagerOrAdminDep` are provided for common combinations. This approach is consistent
+with the existing `get_current_user` pattern and makes role requirements visible directly
+in each route decorator.
+
+**How roles are stored and validated:**
+Roles are stored as a string column (`role`) on the `User` model, using a `UserRole`
+Python enum (`admin`, `manager`, `member`). The default role for new signups is `member`.
+The old `is_superuser` boolean has been replaced by this enum. An Alembic migration
+(`a1b2c3d4e5f6`) handles the schema change and migrates existing data.
+
+**How the frontend learns about user capabilities:**
+The `role` field is included in the `UserPublic` response model, so the frontend receives
+it via `GET /users/me` on every page load. The `useAuth` hook surfaces `user.role`,
+which the sidebar uses to conditionally show navigation links, and route `beforeLoad`
+guards use to redirect unauthorized users.
+
+### Running Tests
+
+```bash
+# Run all backend tests
+docker compose exec backend bash scripts/tests-start.sh
+
+# Run only the RBAC authorization tests
+docker compose exec backend bash -c "pytest tests/api/routes/test_rbac.py -v"
+
+# Expected output:
+# test_admin_can_list_users ......... PASSED
+# test_manager_can_list_users ....... PASSED
+# test_member_cannot_list_users ..... PASSED
+# test_admin_can_create_user ........ PASSED
+# test_manager_cannot_create_user ... PASSED
+# test_member_cannot_create_user .... PASSED
+# test_admin_can_view_metrics ....... PASSED
+# test_manager_can_view_metrics ..... PASSED
+# test_member_cannot_view_metrics ... PASSED
+```
+
+### Files Changed / Added
+
+| File                                              | Change                                                     |
+| ------------------------------------------------- | ---------------------------------------------------------- |
+| `backend/app/models.py`                           | Added `UserRole` enum, replaced `is_superuser` with `role` |
+| `backend/app/api/deps.py`                         | Added `require_role()`, `AdminDep`, `ManagerOrAdminDep`    |
+| `backend/app/api/routes/users.py`                 | Updated all endpoints with role-based deps                 |
+| `backend/app/api/routes/items.py`                 | Updated ownership checks to use role                       |
+| `backend/app/api/routes/metrics.py`               | **New** — metrics stub for admin + manager                 |
+| `backend/app/api/main.py`                         | Registered metrics router                                  |
+| `backend/app/core/db.py`                          | Seed 3 users (admin, manager, member)                      |
+| `backend/app/alembic/versions/a1b2c3d4e5f6_*.py`  | **New** — migration: `is_superuser` → `role`               |
+| `frontend/src/client/types.gen.ts`                | Updated types: `role` replaces `is_superuser`              |
+| `frontend/src/client/schemas.gen.ts`              | Updated schemas: `role` replaces `is_superuser`            |
+| `frontend/src/components/Admin/AddUser.tsx`       | Role dropdown replaces superuser checkbox                  |
+| `frontend/src/components/Admin/EditUser.tsx`      | Role dropdown replaces superuser checkbox                  |
+| `frontend/src/components/Admin/columns.tsx`       | Role badge (Admin/Manager/Member)                          |
+| `frontend/src/components/Sidebar/AppSidebar.tsx`  | Role-based nav items                                       |
+| `frontend/src/components/Common/AccessDenied.tsx` | **New** — 403 page component                               |
+| `frontend/src/routes/_layout/admin.tsx`           | Route guard checks `role === "admin"`                      |
+| `frontend/src/routes/_layout/metrics.tsx`         | **New** — metrics page with route guard                    |
+| `frontend/src/routes/_layout/access-denied.tsx`   | **New** — access denied route                              |
+| `frontend/src/routes/_layout/settings.tsx`        | Danger zone tab only for admin                             |
+| `backend/tests/api/routes/test_rbac.py`           | **New** — 9 RBAC authorization tests                       |
+| `NOTES.md`                                        | **New** — ADRs, trade-offs, future work                    |
+
+### Notes
+
+See [`NOTES.md`](./NOTES.md) for:
+
+- Architecture Decision Records (ADRs)
+- Scope cuts and trade-offs
+- What would be done with more time
+
 ## Release Notes
 
 Check the file [release-notes.md](./release-notes.md).
